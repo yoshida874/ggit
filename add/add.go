@@ -1,10 +1,12 @@
 package add
 
 import (
+	"bytes"
+	"compress/zlib"
 	"crypto/sha1"
+	"encoding/binary"
 	"fmt"
 	"io"
-	"io/ioutil"
 	"os"
 	"path/filepath"
 )
@@ -41,7 +43,7 @@ func saveFileToObjects(path string) (string, error) {
     }
 
     // ファイルの内容をバイナリ形式でオブジェクトファイルに保存する
-    data, err := ioutil.ReadFile(path)
+    data, err := os.ReadFile(path)
     if err != nil {
         return "", err
     }
@@ -51,31 +53,88 @@ func saveFileToObjects(path string) (string, error) {
         return "", err
     }
 
+    // blobとしてデータを圧縮
+    compressedData, err := compressObject(data, "blob")
+    if err != nil {
+        return "", err
+    }
+
     // オブジェクトファイルを保存する
-    if err := ioutil.WriteFile(objPath, data, 0644); err != nil {
+    if err := os.WriteFile(objPath, compressedData, 0644); err != nil {
         return "", err
     }
 
     return hash, nil
 }
 
-func Add(file string) error {
-	// ファイルをオブジェクトファイルに保存する
-	hash, err := saveFileToObjects(file)
-	if err != nil {
-		return err
-	}
-
-	// インデックスファイルにファイル名とハッシュ値を保存する
+// バイナリフォーマットでindexファイルに保存    
+func addToIndex(hash string, file string) error {
 	indexFile, err := os.OpenFile(".ggit/index", os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
 	if err != nil {
 		return err
 	}
 	defer indexFile.Close()
 
-	if _, err := fmt.Fprintf(indexFile, "100644 %s 0\t%s\n", hash, file); err != nil {
+	hashBytes := []byte(hash)
+	fileBytes := []byte(file)
+	
+	err = binary.Write(indexFile, binary.LittleEndian, int64(len(hashBytes)))
+	if err != nil {
 		return err
 	}
 
-    return nil
+	err = binary.Write(indexFile, binary.LittleEndian, hashBytes)
+	if err != nil {
+		return err
+	}
+
+	err = binary.Write(indexFile, binary.LittleEndian, int64(len(fileBytes)))
+	if err != nil {
+		return err
+	}
+
+	err = binary.Write(indexFile, binary.LittleEndian, fileBytes)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// indexに再帰的にファイルを処理
+func Add(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+
+	if info.IsDir() {
+		files, err := os.ReadDir(path)
+		if err != nil {
+			return err
+		}
+		for _, file := range files {
+			err = Add(filepath.Join(path, file.Name()))
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	} else {
+		hash, err := saveFileToObjects(path)
+		if err != nil {
+			return err
+		}
+		return addToIndex(hash, path)
+	}
+}
+
+func compressObject(data []byte, objectType string) ([]byte, error) {
+	var compressedData bytes.Buffer
+	writer := zlib.NewWriter(&compressedData)
+	header := fmt.Sprintf("%s %d\x00", objectType, len(data))
+	writer.Write([]byte(header))
+	writer.Write(data)
+	writer.Close()
+	return compressedData.Bytes(), nil
 }
